@@ -96,3 +96,181 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.neural_network import MLPClassifier
+from sklearn.compose import ColumnTransformer
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+)
+from sklearn.impute import SimpleImputer
+import gzip
+import pickle
+import json
+from sklearn.feature_selection import SelectKBest, f_classif
+
+# Cargar los datos
+train_data = pd.read_csv("files/input/train_data.csv.zip")
+test_data = pd.read_csv("files/input/test_data.csv.zip")
+
+
+# Paso 1: Limpiar los datasets
+def clean_data(df):
+    df.rename(columns={"default payment next month": "default"}, inplace=True)
+    df.drop(columns=["ID"], inplace=True)
+    df.dropna(inplace=True)  # Eliminar registros con información faltante
+    df["EDUCATION"] = df["EDUCATION"].apply(
+        lambda x: 4 if x > 4 else x
+    )  # Agrupar EDUCATION > 4 en "others"
+    return df
+
+
+train_data = clean_data(train_data)
+test_data = clean_data(test_data)
+
+# Dividir en X (características) e y (etiqueta)
+X_train = train_data.drop(columns="default")
+y_train = train_data["default"]
+X_test = test_data.drop(columns="default")
+y_test = test_data["default"]
+
+# Paso 2: Crear el pipeline
+# Preprocesamiento
+numeric_features = X_train.select_dtypes(include=["int64", "float64"]).columns
+categorical_features = X_train.select_dtypes(include=["object"]).columns
+
+# Definir el pipeline
+numeric_transformer = Pipeline(
+    steps=[("imputer", SimpleImputer(strategy="mean")), ("scaler", StandardScaler())]
+)
+
+categorical_transformer = Pipeline(
+    steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+    ]
+)
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, numeric_features),
+        ("cat", categorical_transformer, categorical_features),
+    ]
+)
+
+# Crear el pipeline con PCA, selección de características y red neuronal
+model = Pipeline(
+    steps=[
+        ("preprocessor", preprocessor),
+        ("pca", PCA()),
+        ("select_kbest", SelectKBest(f_classif)),
+        ("classifier", MLPClassifier(max_iter=1000)),
+    ]
+)
+
+# Paso 3: Optimización de hiperparámetros con GridSearchCV
+param_grid = {
+    "pca__n_components": [10, 20, 30],
+    "select_kbest__k": [5, 10, 15],
+    "classifier__hidden_layer_sizes": [(100,), (50, 50)],
+    "classifier__alpha": [0.0001, 0.001],
+}
+
+grid_search = GridSearchCV(model, param_grid, cv=10, scoring="balanced_accuracy")
+grid_search.fit(X_train, y_train)
+
+# Obtener el mejor modelo
+best_model = grid_search.best_estimator_
+
+# Paso 4: Guardar el modelo entrenado
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+    pickle.dump(best_model, f)
+
+
+# Paso 5: Calcular las métricas y guardar en un archivo JSON
+def calculate_metrics(model, X_train, y_train, X_test, y_test):
+    # Predicciones
+    y_train_pred = model.predict(X_train)
+    y_test_pred = model.predict(X_test)
+
+    metrics = []
+
+    # Métricas para el conjunto de entrenamiento
+    metrics.append(
+        {
+            "dataset": "train",
+            "precision": precision_score(y_train, y_train_pred),
+            "balanced_accuracy": balanced_accuracy_score(y_train, y_train_pred),
+            "recall": recall_score(y_train, y_train_pred),
+            "f1_score": f1_score(y_train, y_train_pred),
+        }
+    )
+
+    # Métricas para el conjunto de prueba
+    metrics.append(
+        {
+            "dataset": "test",
+            "precision": precision_score(y_test, y_test_pred),
+            "balanced_accuracy": balanced_accuracy_score(y_test, y_test_pred),
+            "recall": recall_score(y_test, y_test_pred),
+            "f1_score": f1_score(y_test, y_test_pred),
+        }
+    )
+
+    return metrics
+
+
+metrics = calculate_metrics(best_model, X_train, y_train, X_test, y_test)
+
+# Guardar las métricas en un archivo JSON
+with open("files/output/metrics.json", "w") as f:
+    for metric in metrics:
+        json.dump(metric, f)
+        f.write("\n")
+
+
+# Paso 6: Calcular las matrices de confusión y guardarlas
+def calculate_confusion_matrices(model, X_train, y_train, X_test, y_test):
+    # Predicciones
+    y_train_pred = model.predict(X_train)
+    y_test_pred = model.predict(X_test)
+
+    cm_train = confusion_matrix(y_train, y_train_pred)
+    cm_test = confusion_matrix(y_test, y_test_pred)
+
+    confusion_matrices = [
+        {
+            "type": "cm_matrix",
+            "dataset": "train",
+            "true_0": {"predicted_0": cm_train[0][0], "predicted_1": cm_train[0][1]},
+            "true_1": {"predicted_0": cm_train[1][0], "predicted_1": cm_train[1][1]},
+        },
+        {
+            "type": "cm_matrix",
+            "dataset": "test",
+            "true_0": {"predicted_0": cm_test[0][0], "predicted_1": cm_test[0][1]},
+            "true_1": {"predicted_0": cm_test[1][0], "predicted_1": cm_test[1][1]},
+        },
+    ]
+
+    return confusion_matrices
+
+
+confusion_matrices = calculate_confusion_matrices(
+    best_model, X_train, y_train, X_test, y_test
+)
+
+# Guardar las matrices de confusión en el archivo JSON
+with open("files/output/metrics.json", "a") as f:
+    for cm in confusion_matrices:
+        json.dump(cm, f)
+        f.write("\n")
